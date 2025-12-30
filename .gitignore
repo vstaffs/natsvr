@@ -1,0 +1,40 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace file
+go.work
+
+# Database
+*.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Node
+node_modules/
+web/node_modules/
+
+# Build output
+web/dist/
+cmd/cloud/dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

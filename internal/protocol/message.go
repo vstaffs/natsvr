@@ -1,0 +1,278 @@
+package protocol
+
+import (
+	"encoding/binary"
+	"errors"
+	"io"
+)
+
+// Message types
+type MessageType uint8
+
+const (
+	// Control messages
+	MsgTypeAuth         MessageType = 1
+	MsgTypeAuthResponse MessageType = 2
+	MsgTypeHeartbeat    MessageType = 3
+	MsgTypeHeartbeatAck MessageType = 4
+
+	// Tunnel control
+	MsgTypeConnect    MessageType = 10
+	MsgTypeConnectAck MessageType = 11
+	MsgTypeClose      MessageType = 12
+
+	// Data transfer
+	MsgTypeData MessageType = 20
+
+	// UDP specific
+	MsgTypeUDPData MessageType = 30
+
+	// ICMP specific
+	MsgTypeICMPData MessageType = 40
+
+	// Error
+	MsgTypeError MessageType = 255
+)
+
+// Protocol constants
+const (
+	MaxPayloadSize = 65535
+	HeaderSize     = 9 // 1 (type) + 4 (tunnel ID) + 4 (payload length)
+	MagicNumber    = 0x4E415453 // "NATS"
+)
+
+// Message represents a protocol message
+type Message struct {
+	Type     MessageType
+	TunnelID uint32
+	Payload  []byte
+}
+
+// AuthPayload is the authentication request payload
+type AuthPayload struct {
+	Token     string
+	AgentName string
+	AgentID   string
+}
+
+// AuthResponsePayload is the authentication response payload
+type AuthResponsePayload struct {
+	Success bool
+	AgentID string
+	Error   string
+}
+
+// ConnectPayload is the tunnel connect request payload
+type ConnectPayload struct {
+	Protocol   string // "tcp", "udp", "icmp"
+	TargetHost string
+	TargetPort uint16
+	SourceHost string
+	SourcePort uint16
+}
+
+// ConnectAckPayload is the tunnel connect response payload
+type ConnectAckPayload struct {
+	Success  bool
+	TunnelID uint32
+	Error    string
+}
+
+// UDPDataPayload contains UDP packet data with addressing info
+type UDPDataPayload struct {
+	SourceAddr string
+	SourcePort uint16
+	DestAddr   string
+	DestPort   uint16
+	Data       []byte
+}
+
+// ICMPDataPayload contains ICMP packet data
+type ICMPDataPayload struct {
+	Type     uint8
+	Code     uint8
+	DestAddr string
+	Data     []byte
+}
+
+// ErrorPayload contains error information
+type ErrorPayload struct {
+	Code    uint16
+	Message string
+}
+
+// Error codes
+const (
+	ErrCodeUnknown      uint16 = 0
+	ErrCodeAuthFailed   uint16 = 1
+	ErrCodeConnectFailed uint16 = 2
+	ErrCodeTunnelClosed uint16 = 3
+	ErrCodeInvalidMsg   uint16 = 4
+)
+
+var (
+	ErrInvalidMessage  = errors.New("invalid message")
+	ErrPayloadTooLarge = errors.New("payload too large")
+	ErrInvalidMagic    = errors.New("invalid magic number")
+)
+
+// NewMessage creates a new message
+func NewMessage(msgType MessageType, tunnelID uint32, payload []byte) *Message {
+	return &Message{
+		Type:     msgType,
+		TunnelID: tunnelID,
+		Payload:  payload,
+	}
+}
+
+// NewAuthMessage creates an authentication message
+func NewAuthMessage(token, agentName, agentID string) *Message {
+	payload := EncodeAuthPayload(&AuthPayload{
+		Token:     token,
+		AgentName: agentName,
+		AgentID:   agentID,
+	})
+	return NewMessage(MsgTypeAuth, 0, payload)
+}
+
+// NewHeartbeatMessage creates a heartbeat message
+func NewHeartbeatMessage() *Message {
+	return NewMessage(MsgTypeHeartbeat, 0, nil)
+}
+
+// NewHeartbeatAckMessage creates a heartbeat acknowledgment message
+func NewHeartbeatAckMessage() *Message {
+	return NewMessage(MsgTypeHeartbeatAck, 0, nil)
+}
+
+// NewConnectMessage creates a tunnel connect message
+func NewConnectMessage(tunnelID uint32, protocol, targetHost string, targetPort uint16) *Message {
+	payload := EncodeConnectPayload(&ConnectPayload{
+		Protocol:   protocol,
+		TargetHost: targetHost,
+		TargetPort: targetPort,
+	})
+	return NewMessage(MsgTypeConnect, tunnelID, payload)
+}
+
+// NewDataMessage creates a data message
+func NewDataMessage(tunnelID uint32, data []byte) *Message {
+	return NewMessage(MsgTypeData, tunnelID, data)
+}
+
+// NewCloseMessage creates a tunnel close message
+func NewCloseMessage(tunnelID uint32) *Message {
+	return NewMessage(MsgTypeClose, tunnelID, nil)
+}
+
+// NewErrorMessage creates an error message
+func NewErrorMessage(tunnelID uint32, code uint16, message string) *Message {
+	payload := EncodeErrorPayload(&ErrorPayload{
+		Code:    code,
+		Message: message,
+	})
+	return NewMessage(MsgTypeError, tunnelID, payload)
+}
+
+// Encode serializes the message to bytes
+func (m *Message) Encode() ([]byte, error) {
+	if len(m.Payload) > MaxPayloadSize {
+		return nil, ErrPayloadTooLarge
+	}
+
+	buf := make([]byte, HeaderSize+len(m.Payload))
+	buf[0] = byte(m.Type)
+	binary.BigEndian.PutUint32(buf[1:5], m.TunnelID)
+	binary.BigEndian.PutUint32(buf[5:9], uint32(len(m.Payload)))
+	copy(buf[9:], m.Payload)
+
+	return buf, nil
+}
+
+// Decode deserializes bytes to a message
+func Decode(r io.Reader) (*Message, error) {
+	header := make([]byte, HeaderSize)
+	if _, err := io.ReadFull(r, header); err != nil {
+		return nil, err
+	}
+
+	msgType := MessageType(header[0])
+	tunnelID := binary.BigEndian.Uint32(header[1:5])
+	payloadLen := binary.BigEndian.Uint32(header[5:9])
+
+	if payloadLen > MaxPayloadSize {
+		return nil, ErrPayloadTooLarge
+	}
+
+	var payload []byte
+	if payloadLen > 0 {
+		payload = make([]byte, payloadLen)
+		if _, err := io.ReadFull(r, payload); err != nil {
+			return nil, err
+		}
+	}
+
+	return &Message{
+		Type:     msgType,
+		TunnelID: tunnelID,
+		Payload:  payload,
+	}, nil
+}
+
+// DecodeFromBytes decodes a message from a byte slice
+func DecodeFromBytes(data []byte) (*Message, error) {
+	if len(data) < HeaderSize {
+		return nil, ErrInvalidMessage
+	}
+
+	msgType := MessageType(data[0])
+	tunnelID := binary.BigEndian.Uint32(data[1:5])
+	payloadLen := binary.BigEndian.Uint32(data[5:9])
+
+	if uint32(len(data)) < HeaderSize+payloadLen {
+		return nil, ErrInvalidMessage
+	}
+
+	var payload []byte
+	if payloadLen > 0 {
+		payload = make([]byte, payloadLen)
+		copy(payload, data[HeaderSize:HeaderSize+payloadLen])
+	}
+
+	return &Message{
+		Type:     msgType,
+		TunnelID: tunnelID,
+		Payload:  payload,
+	}, nil
+}
+
+// String returns a string representation of the message type
+func (t MessageType) String() string {
+	switch t {
+	case MsgTypeAuth:
+		return "Auth"
+	case MsgTypeAuthResponse:
+		return "AuthResponse"
+	case MsgTypeHeartbeat:
+		return "Heartbeat"
+	case MsgTypeHeartbeatAck:
+		return "HeartbeatAck"
+	case MsgTypeConnect:
+		return "Connect"
+	case MsgTypeConnectAck:
+		return "ConnectAck"
+	case MsgTypeClose:
+		return "Close"
+	case MsgTypeData:
+		return "Data"
+	case MsgTypeUDPData:
+		return "UDPData"
+	case MsgTypeICMPData:
+		return "ICMPData"
+	case MsgTypeError:
+		return "Error"
+	default:
+		return "Unknown"
+	}
+}
+
