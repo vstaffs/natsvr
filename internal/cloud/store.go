@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 // ForwardRule represents a port forwarding rule
@@ -41,7 +41,7 @@ type Store struct {
 
 // NewStore creates a new store
 func NewStore(dbPath string) (*Store, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, err
 	}
@@ -245,4 +245,3 @@ func (s *Store) IncrementTokenUsage(id string) error {
 	_, err := s.db.Exec("UPDATE tokens SET usage_count = usage_count + 1 WHERE id = ?", id)
 	return err
 }
-

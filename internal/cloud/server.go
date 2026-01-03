@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"sync"
 	"time"
 
@@ -19,9 +21,11 @@ var WebFS embed.FS
 
 // Config holds server configuration
 type Config struct {
-	Addr   string
-	Token  string
-	DBPath string
+	Addr    string
+	Token   string
+	DBPath  string
+	DevMode bool   // When true, proxy frontend to Vite dev server
+	DevURL  string // Vite dev server URL (default: http://localhost:5173)
 }
 
 // Server is the main cloud server
@@ -124,25 +128,53 @@ func (s *Server) setupRouter() {
 	}
 
 	// Serve frontend
-	distFS, err := fs.Sub(WebFS, "dist")
-	if err != nil {
-		log.Printf("Warning: Could not load embedded frontend: %v, trying filesystem fallback", err)
-		// Fallback: serve from filesystem for development
-		r.Static("/assets", "./web/dist/assets")
-		r.StaticFile("/", "./web/dist/index.html")
+	if s.config.DevMode {
+		// Development mode: proxy to Vite dev server
+		devURL := s.config.DevURL
+		if devURL == "" {
+			devURL = "http://localhost:5173"
+		}
+		target, err := url.Parse(devURL)
+		if err != nil {
+			log.Fatalf("Invalid dev server URL: %v", err)
+		}
+		proxy := httputil.NewSingleHostReverseProxy(target)
+		log.Printf("Dev mode: proxying frontend to %s", devURL)
+
+		r.GET("/", func(c *gin.Context) {
+			proxy.ServeHTTP(c.Writer, c.Request)
+		})
 		r.NoRoute(func(c *gin.Context) {
-			c.File("./web/dist/index.html")
+			proxy.ServeHTTP(c.Writer, c.Request)
 		})
 	} else {
-		r.StaticFS("/assets", http.FS(distFS))
-		r.GET("/", func(c *gin.Context) {
-			data, _ := fs.ReadFile(distFS, "index.html")
-			c.Data(http.StatusOK, "text/html; charset=utf-8", data)
-		})
-		r.NoRoute(func(c *gin.Context) {
-			data, _ := fs.ReadFile(distFS, "index.html")
-			c.Data(http.StatusOK, "text/html; charset=utf-8", data)
-		})
+		// Production mode: serve embedded frontend
+		distFS, err := fs.Sub(WebFS, "dist")
+		if err != nil {
+			log.Printf("Warning: Could not load embedded frontend: %v, trying filesystem fallback", err)
+			// Fallback: serve from filesystem for development
+			r.Static("/assets", "./web/dist/assets")
+			r.StaticFile("/", "./web/dist/index.html")
+			r.NoRoute(func(c *gin.Context) {
+				c.File("./web/dist/index.html")
+			})
+		} else {
+			// Create sub-filesystem for assets folder
+			assetsFS, err := fs.Sub(distFS, "assets")
+			if err != nil {
+				log.Printf("Warning: Could not load assets: %v", err)
+			} else {
+				r.StaticFS("/assets", http.FS(assetsFS))
+			}
+			r.GET("/", func(c *gin.Context) {
+				data, _ := fs.ReadFile(distFS, "index.html")
+				c.Data(http.StatusOK, "text/html; charset=utf-8", data)
+			})
+			r.NoRoute(func(c *gin.Context) {
+				data, _ := fs.ReadFile(distFS, "index.html")
+				c.Data(http.StatusOK, "text/html; charset=utf-8", data)
+			})
+		}
 	}
 
 	s.router = r

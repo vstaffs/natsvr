@@ -25,7 +25,23 @@ Agent A (内网1) <--WebSocket--> Cloud Server <--WebSocket--> Agent B (内网2)
 
 ## 快速开始
 
-### 编译
+### 安装
+
+从 [Releases](https://github.com/vstaffs/natsvr/releases) 下载对应平台的二进制文件，或使用以下命令：
+
+```bash
+# Linux amd64
+curl -Lo natsvr-cloud https://github.com/vstaffs/natsvr/releases/latest/download/natsvr-cloud-linux-amd64
+curl -Lo natsvr-agent https://github.com/vstaffs/natsvr/releases/latest/download/natsvr-agent-linux-amd64
+chmod +x natsvr-cloud natsvr-agent
+
+# Linux arm64
+curl -Lo natsvr-cloud https://github.com/vstaffs/natsvr/releases/latest/download/natsvr-cloud-linux-arm64
+curl -Lo natsvr-agent https://github.com/vstaffs/natsvr/releases/latest/download/natsvr-agent-linux-arm64
+chmod +x natsvr-cloud natsvr-agent
+```
+
+### 从源码编译
 
 ```bash
 make build
@@ -34,13 +50,29 @@ make build
 ### 运行 Cloud 服务器
 
 ```bash
-./bin/cloud -addr :8080 -token your-secret-token
+./natsvr-cloud -addr :8080 -token your-secret-token
+
+# 或使用配置文件 (支持 YAML/JSON)
+./natsvr-cloud -config /etc/natsvr/cloud.yaml
+```
+
+配置文件示例 (`cloud.yaml`):
+
+```yaml
+# 监听地址
+addr: :8080
+
+# 管理员 Token
+admin_token: your-secret-token
+
+# 数据目录
+data_dir: /var/lib/natsvr
 ```
 
 ### 运行 Agent
 
 ```bash
-./bin/agent -server ws://cloud-server:8080/ws -token your-secret-token -name agent1
+./natsvr-agent -server ws://cloud-server:8080/ws -token your-secret-token -name agent1
 ```
 
 ## 端口转发
