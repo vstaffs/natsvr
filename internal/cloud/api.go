@@ -156,9 +156,15 @@ func (s *Server) handleCreateForwardRule(c *gin.Context) {
 		return
 	}
 
-	// Validate targetAgentId is required for non cloud-self types
-	if req.Type != "cloud-self" && req.TargetAgentID == "" {
+	// Validate targetAgentId is required for cloud-agent and agent-agent types
+	if (req.Type == "cloud-agent" || req.Type == "remote" || req.Type == "agent-agent" || req.Type == "local" || req.Type == "p2p") && req.TargetAgentID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "targetAgentId is required for this forward type"})
+		return
+	}
+
+	// Validate sourceAgentId is required for agent-cloud and agent-agent types
+	if (req.Type == "agent-cloud" || req.Type == "agent-agent" || req.Type == "local" || req.Type == "p2p") && req.SourceAgentID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "sourceAgentId is required for this forward type"})
 		return
 	}
 

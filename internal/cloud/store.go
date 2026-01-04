@@ -11,7 +11,7 @@ import (
 type ForwardRule struct {
 	ID            string
 	Name          string
-	Type          string // "local", "remote", "p2p", "cloud-self"
+	Type          string // "cloud-direct", "cloud-agent", "agent-cloud", "agent-agent"
 	Protocol      string // "tcp", "udp"
 	SourceAgentID string
 	ListenPort    int

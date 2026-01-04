@@ -106,7 +106,7 @@ func (f *Forwarder) StartRule(rule *ForwardRule) error {
 	}
 
 	switch rule.Type {
-	case "remote":
+	case "remote", "cloud-agent":
 		// Cloud listens, forwards to agent
 		if rule.Protocol == "tcp" {
 			listener, err := net.Listen("tcp", fmt.Sprintf(":%d", rule.ListenPort))
@@ -127,7 +127,7 @@ func (f *Forwarder) StartRule(rule *ForwardRule) error {
 			state.UDPConn = conn
 			go f.handleRemoteUDPListener(state)
 		}
-	case "cloud-self":
+	case "cloud-self", "cloud-direct":
 		// Cloud listens, forwards directly to target server (no agent involved)
 		if rule.Protocol == "tcp" {
 			listener, err := net.Listen("tcp", fmt.Sprintf(":%d", rule.ListenPort))
@@ -148,7 +148,21 @@ func (f *Forwarder) StartRule(rule *ForwardRule) error {
 			state.UDPConn = conn
 			go f.handleCloudSelfUDPListener(state)
 		}
-	case "local", "p2p":
+	case "agent-cloud":
+		// Agent listens, forwards through cloud to target server (no target agent)
+		if rule.SourceAgentID != "" {
+			sourceAgent := f.server.GetAgentByName(rule.SourceAgentID)
+			if sourceAgent == nil {
+				sourceAgent = f.server.GetAgent(rule.SourceAgentID)
+			}
+			if sourceAgent != nil {
+				log.Printf("Sending agent-cloud proxy rule %s to source agent %s", rule.Name, sourceAgent.Name)
+				f.sendAgentCloudProxyStart(sourceAgent, rule)
+			} else {
+				log.Printf("Source agent %s not connected, rule will be sent when agent connects", rule.SourceAgentID)
+			}
+		}
+	case "local", "p2p", "agent-agent":
 		// Agent to agent forwarding - notify source agent to start listening
 		if rule.SourceAgentID != "" {
 			// Try to find source agent by name first, then by ID
@@ -198,14 +212,25 @@ func (f *Forwarder) StopRule(ruleID string) error {
 	delete(f.rules, ruleID)
 	f.rulesMu.Unlock()
 
-	// For local/p2p rules, notify source agent to stop
-	if (rule.Type == "local" || rule.Type == "p2p") && rule.SourceAgentID != "" {
+	// For local/p2p/agent-agent rules, notify source agent to stop
+	if (rule.Type == "local" || rule.Type == "p2p" || rule.Type == "agent-agent") && rule.SourceAgentID != "" {
 		sourceAgent := f.server.GetAgentByName(rule.SourceAgentID)
 		if sourceAgent == nil {
 			sourceAgent = f.server.GetAgent(rule.SourceAgentID)
 		}
 		if sourceAgent != nil {
 			f.sendLocalProxyStop(sourceAgent, ruleID)
+		}
+	}
+
+	// For agent-cloud rules, notify source agent to stop
+	if rule.Type == "agent-cloud" && rule.SourceAgentID != "" {
+		sourceAgent := f.server.GetAgentByName(rule.SourceAgentID)
+		if sourceAgent == nil {
+			sourceAgent = f.server.GetAgent(rule.SourceAgentID)
+		}
+		if sourceAgent != nil {
+			f.sendAgentCloudProxyStop(sourceAgent, ruleID)
 		}
 	}
 
@@ -674,6 +699,28 @@ func (f *Forwarder) sendLocalProxyStop(agent *AgentConn, ruleID string) error {
 	return f.server.sendToAgent(agent, msg)
 }
 
+// sendAgentCloudProxyStart sends an agent-cloud proxy start message to an agent
+func (f *Forwarder) sendAgentCloudProxyStart(agent *AgentConn, rule *ForwardRule) error {
+	payload := protocol.EncodeAgentCloudProxyStartPayload(&protocol.AgentCloudProxyStartPayload{
+		RuleID:     rule.ID,
+		Protocol:   rule.Protocol,
+		ListenPort: uint16(rule.ListenPort),
+		TargetHost: rule.TargetHost,
+		TargetPort: uint16(rule.TargetPort),
+	})
+	msg := protocol.NewMessage(protocol.MsgTypeAgentCloudProxyStart, 0, payload)
+	return f.server.sendToAgent(agent, msg)
+}
+
+// sendAgentCloudProxyStop sends an agent-cloud proxy stop message to an agent
+func (f *Forwarder) sendAgentCloudProxyStop(agent *AgentConn, ruleID string) error {
+	payload := protocol.EncodeAgentCloudProxyStopPayload(&protocol.AgentCloudProxyStopPayload{
+		RuleID: ruleID,
+	})
+	msg := protocol.NewMessage(protocol.MsgTypeAgentCloudProxyStop, 0, payload)
+	return f.server.sendToAgent(agent, msg)
+}
+
 // OnAgentConnected is called when an agent connects, to send it local proxy rules
 func (f *Forwarder) OnAgentConnected(agent *AgentConn) {
 	rules, err := f.server.store.GetForwardRules()
@@ -683,15 +730,25 @@ func (f *Forwarder) OnAgentConnected(agent *AgentConn) {
 	}
 
 	for _, rule := range rules {
-		if !rule.Enabled || (rule.Type != "local" && rule.Type != "p2p") {
+		if !rule.Enabled {
 			continue
 		}
 
 		// Match by ID or by name
-		if rule.SourceAgentID == agent.ID || rule.SourceAgentID == agent.Name {
+		if rule.SourceAgentID != agent.ID && rule.SourceAgentID != agent.Name {
+			continue
+		}
+
+		switch rule.Type {
+		case "local", "p2p", "agent-agent":
 			log.Printf("Sending local proxy rule %s to agent %s (%s)", rule.Name, agent.Name, agent.ID)
 			if err := f.sendLocalProxyStart(agent, rule); err != nil {
 				log.Printf("Failed to send local proxy start to agent %s: %v", agent.ID, err)
+			}
+		case "agent-cloud":
+			log.Printf("Sending agent-cloud proxy rule %s to agent %s (%s)", rule.Name, agent.Name, agent.ID)
+			if err := f.sendAgentCloudProxyStart(agent, rule); err != nil {
+				log.Printf("Failed to send agent-cloud proxy start to agent %s: %v", agent.ID, err)
 			}
 		}
 	}
@@ -880,5 +937,138 @@ func (f *Forwarder) HandleP2PDataReverse(targetAgent *AgentConn, tunnelID uint32
 	// Source agent will map it using its stored global->local mapping
 	dataMsg := protocol.NewMessage(protocol.MsgTypeP2PData, tunnelID, data)
 	f.server.sendToAgent(sourceAgent, dataMsg)
+}
+
+// HandleAgentCloudConnect handles agent-cloud connection request from source agent
+// Agent listens locally and requests cloud to connect to target server directly
+func (f *Forwarder) HandleAgentCloudConnect(sourceAgent *AgentConn, msg *protocol.Message) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Panic in HandleAgentCloudConnect: %v", r)
+		}
+	}()
+
+	payload, err := protocol.DecodeAgentCloudConnectPayload(msg.Payload)
+	if err != nil {
+		log.Printf("Failed to decode agent-cloud connect payload: %v", err)
+		return
+	}
+
+	localTunnelID := msg.TunnelID
+
+	log.Printf("Agent-cloud connect request from agent %s: target=%s:%d, localTunnelID=%d",
+		sourceAgent.ID, payload.TargetHost, payload.TargetPort, localTunnelID)
+
+	// Generate global tunnel ID
+	globalTunnelID := atomic.AddUint32(&f.tunnelIDGen, 1)
+
+	// Connect to target server directly from cloud
+	targetAddr := fmt.Sprintf("%s:%d", payload.TargetHost, payload.TargetPort)
+	targetConn, err := net.DialTimeout("tcp", targetAddr, 30*time.Second)
+	if err != nil {
+		log.Printf("Agent-cloud connect: failed to connect to target %s: %v", targetAddr, err)
+		ackPayload := protocol.EncodeConnectAckPayload(&protocol.ConnectAckPayload{
+			Success:  false,
+			TunnelID: localTunnelID,
+			Error:    err.Error(),
+		})
+		ackMsg := protocol.NewMessage(protocol.MsgTypeAgentCloudConnectAck, localTunnelID, ackPayload)
+		f.server.sendToAgent(sourceAgent, ackMsg)
+		return
+	}
+
+	// Send success ack to agent
+	ackPayload := protocol.EncodeConnectAckPayload(&protocol.ConnectAckPayload{
+		Success:  true,
+		TunnelID: globalTunnelID,
+		Error:    "",
+	})
+	ackMsg := protocol.NewMessage(protocol.MsgTypeAgentCloudConnectAck, localTunnelID, ackPayload)
+	f.server.sendToAgent(sourceAgent, ackMsg)
+
+	// Register tunnel connection (with target connection instead of client connection)
+	tunnelConn := &TunnelConn{
+		ID:            globalTunnelID,
+		AgentID:       sourceAgent.ID,
+		Conn:          targetConn, // This is the connection to target server
+		Protocol:      payload.Protocol,
+		Target:        targetAddr,
+		SourceAgentID: sourceAgent.ID,
+		LocalTunnelID: localTunnelID,
+	}
+
+	f.tunnelConnMu.Lock()
+	f.tunnelConns[globalTunnelID] = tunnelConn
+	f.tunnelConnMu.Unlock()
+
+	log.Printf("Agent-cloud tunnel %d established: agent=%s -> cloud -> %s", globalTunnelID, sourceAgent.ID, targetAddr)
+
+	// Start reading from target and forward to agent
+	go f.readFromAgentCloudTarget(sourceAgent, tunnelConn)
+}
+
+// readFromAgentCloudTarget reads data from target server and forwards to source agent
+func (f *Forwarder) readFromAgentCloudTarget(sourceAgent *AgentConn, tunnelConn *TunnelConn) {
+	defer func() {
+		tunnelConn.Conn.Close()
+		f.tunnelConnMu.Lock()
+		delete(f.tunnelConns, tunnelConn.ID)
+		f.tunnelConnMu.Unlock()
+		log.Printf("Agent-cloud tunnel %d closed", tunnelConn.ID)
+	}()
+
+	buf := make([]byte, 32768)
+	for {
+		n, err := tunnelConn.Conn.Read(buf)
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("Agent-cloud tunnel %d: read from target error: %v", tunnelConn.ID, err)
+			}
+			// Send close to agent
+			closeMsg := protocol.NewMessage(protocol.MsgTypeClose, tunnelConn.ID, nil)
+			f.server.sendToAgent(sourceAgent, closeMsg)
+			return
+		}
+
+		if n > 0 {
+			// Send data back to agent
+			dataMsg := protocol.NewMessage(protocol.MsgTypeAgentCloudData, tunnelConn.ID, buf[:n])
+			if err := f.server.sendToAgent(sourceAgent, dataMsg); err != nil {
+				log.Printf("Agent-cloud tunnel %d: send to agent error: %v", tunnelConn.ID, err)
+				return
+			}
+		}
+	}
+}
+
+// HandleAgentCloudData handles data from agent for agent-cloud tunnel
+func (f *Forwarder) HandleAgentCloudData(sourceAgent *AgentConn, msg *protocol.Message) {
+	f.tunnelConnMu.RLock()
+	tunnelConn, exists := f.tunnelConns[msg.TunnelID]
+	f.tunnelConnMu.RUnlock()
+
+	if !exists {
+		log.Printf("Agent-cloud data: tunnel %d not found", msg.TunnelID)
+		return
+	}
+
+	// Write data to target server
+	_, err := tunnelConn.Conn.Write(msg.Payload)
+	if err != nil {
+		log.Printf("Agent-cloud tunnel %d: write to target error: %v", msg.TunnelID, err)
+		tunnelConn.Conn.Close()
+	}
+}
+
+// HandleAgentCloudClose handles close message from agent for agent-cloud tunnel
+func (f *Forwarder) HandleAgentCloudClose(sourceAgent *AgentConn, msg *protocol.Message) {
+	f.tunnelConnMu.Lock()
+	tunnelConn, exists := f.tunnelConns[msg.TunnelID]
+	if exists {
+		tunnelConn.Conn.Close()
+		delete(f.tunnelConns, msg.TunnelID)
+		log.Printf("Agent-cloud tunnel %d closed by agent", msg.TunnelID)
+	}
+	f.tunnelConnMu.Unlock()
 }
 

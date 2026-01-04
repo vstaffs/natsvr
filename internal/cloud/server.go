@@ -399,6 +399,12 @@ func (s *Server) handleAgentMessages(agent *AgentConn) {
 		case protocol.MsgTypeP2PData:
 			log.Printf("Received P2P data from agent %s, tunnelID=%d, size=%d bytes", agent.ID, msg.TunnelID, len(msg.Payload))
 			s.forwarder.HandleP2PData(agent, msg)
+
+		case protocol.MsgTypeAgentCloudConnect:
+			go s.forwarder.HandleAgentCloudConnect(agent, msg)
+
+		case protocol.MsgTypeAgentCloudData:
+			s.forwarder.HandleAgentCloudData(agent, msg)
 		}
 	}
 }

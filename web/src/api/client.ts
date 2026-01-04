@@ -11,10 +11,20 @@ export interface Agent {
   rxBytes: number
 }
 
+// Forward types:
+// - cloud-direct: Cloud listens, forwards directly to target server (no agent)
+// - cloud-agent: Cloud listens, forwards to agent which connects to target
+// - agent-cloud: Agent listens, forwards through cloud to target server (no target agent)
+// - agent-agent: Agent listens, forwards through cloud to another agent
+// Legacy types: local, remote, p2p, cloud-self (for backward compatibility)
+export type ForwardType = 
+  | 'cloud-direct' | 'cloud-agent' | 'agent-cloud' | 'agent-agent'
+  | 'local' | 'remote' | 'p2p' | 'cloud-self'
+
 export interface ForwardRule {
   id: string
   name: string
-  type: 'local' | 'remote' | 'p2p' | 'cloud-self'
+  type: ForwardType
   protocol: 'tcp' | 'udp'
   sourceAgentId?: string
   listenPort: number

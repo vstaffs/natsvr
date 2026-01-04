@@ -22,7 +22,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { api, ForwardRule, Agent } from '@/api/client'
+import { api, ForwardRule, ForwardType, Agent } from '@/api/client'
 import { formatBytes, formatSpeed } from '@/lib/utils'
 import { Plus, Trash2, ArrowRight, RefreshCw, Gauge } from 'lucide-react'
 
@@ -133,6 +133,62 @@ function RuleCard({
   const sourceAgent = agents.find(a => a.id === rule.sourceAgentId)
   const targetAgent = agents.find(a => a.id === rule.targetAgentId)
 
+  // Determine display based on forward type
+  const getTypeLabel = () => {
+    switch (rule.type) {
+      case 'cloud-direct':
+      case 'cloud-self':
+        return '云端直连'
+      case 'cloud-agent':
+      case 'remote':
+        return '云端→客户端'
+      case 'agent-cloud':
+        return '客户端→云端'
+      case 'agent-agent':
+      case 'local':
+      case 'p2p':
+        return '客户端→客户端'
+      default:
+        return rule.type
+    }
+  }
+
+  // Determine the listen side display
+  const getListenSide = () => {
+    switch (rule.type) {
+      case 'cloud-direct':
+      case 'cloud-self':
+      case 'cloud-agent':
+      case 'remote':
+        return `Cloud:${rule.listenPort}`
+      case 'agent-cloud':
+      case 'agent-agent':
+      case 'local':
+      case 'p2p':
+        return `${sourceAgent?.name || rule.sourceAgentId || 'Unknown'}:${rule.listenPort}`
+      default:
+        return `${rule.listenPort}`
+    }
+  }
+
+  // Determine the target side display
+  const getTargetSide = () => {
+    switch (rule.type) {
+      case 'cloud-direct':
+      case 'cloud-self':
+      case 'agent-cloud':
+        return `${rule.targetHost}:${rule.targetPort}`
+      case 'cloud-agent':
+      case 'remote':
+      case 'agent-agent':
+      case 'local':
+      case 'p2p':
+        return `${targetAgent?.name || rule.targetAgentId}→${rule.targetHost}:${rule.targetPort}`
+      default:
+        return `${rule.targetHost}:${rule.targetPort}`
+    }
+  }
+
   return (
     <div className="flex items-center justify-between p-4 rounded-lg border border-border/50 bg-background/50">
       <div className="flex items-center gap-4">
@@ -144,14 +200,15 @@ function RuleCard({
           <Badge variant={rule.protocol === 'tcp' ? 'default' : 'secondary'}>
             {rule.protocol.toUpperCase()}
           </Badge>
+          <Badge variant="outline" className="text-xs">
+            {getTypeLabel()}
+          </Badge>
           <span className="text-sm font-mono">
-            {(rule.type === 'remote' || rule.type === 'cloud-self') ? `Cloud:${rule.listenPort}` : `${sourceAgent?.name || 'Unknown'}:${rule.listenPort}`}
+            {getListenSide()}
           </span>
           <ArrowRight className="w-4 h-4 text-muted-foreground" />
           <span className="text-sm font-mono">
-            {rule.type === 'cloud-self' 
-              ? `${rule.targetHost}:${rule.targetPort}` 
-              : `${targetAgent?.name || rule.targetAgentId}:${rule.targetHost}:${rule.targetPort}`}
+            {getTargetSide()}
           </span>
         </div>
       </div>
@@ -183,7 +240,7 @@ function RuleCard({
 
 interface CreateRuleForm {
   name: string
-  type: 'local' | 'remote' | 'p2p' | 'cloud-self'
+  type: ForwardType
   protocol: 'tcp' | 'udp'
   sourceAgentId: string
   listenPort: string
@@ -205,7 +262,7 @@ function CreateRuleDialog({
 }) {
   const [form, setForm] = useState<CreateRuleForm>({
     name: '',
-    type: 'remote',
+    type: 'cloud-agent',
     protocol: 'tcp',
     sourceAgentId: '',
     listenPort: '',
@@ -222,13 +279,17 @@ function CreateRuleDialog({
     const rateLimitBytes = form.rateLimit ? parseFloat(form.rateLimit) * 1024 * 1024 : 0
     const trafficLimitBytes = form.trafficLimit ? parseFloat(form.trafficLimit) * 1024 * 1024 * 1024 : 0
     
+    // Determine which fields to include based on type
+    const needsSourceAgent = form.type === 'agent-cloud' || form.type === 'agent-agent'
+    const needsTargetAgent = form.type === 'cloud-agent' || form.type === 'agent-agent'
+    
     onSubmit({
       name: form.name,
       type: form.type,
       protocol: form.protocol,
-      sourceAgentId: form.sourceAgentId || undefined,
+      sourceAgentId: needsSourceAgent ? form.sourceAgentId : undefined,
       listenPort: parseInt(form.listenPort),
-      targetAgentId: form.type === 'cloud-self' ? undefined : form.targetAgentId,
+      targetAgentId: needsTargetAgent ? form.targetAgentId : undefined,
       targetHost: form.targetHost,
       targetPort: parseInt(form.targetPort),
       rateLimit: rateLimitBytes,
@@ -256,15 +317,15 @@ function CreateRuleDialog({
         <div className="grid grid-cols-2 gap-4">
           <div className="grid gap-2">
             <Label>转发类型</Label>
-            <Select value={form.type} onValueChange={(v) => setForm({ ...form, type: v as 'local' | 'remote' | 'p2p' | 'cloud-self' })}>
+            <Select value={form.type} onValueChange={(v) => setForm({ ...form, type: v as ForwardType })}>
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="remote">Remote (Cloud → Agent)</SelectItem>
-                <SelectItem value="cloud-self">Cloud-Self (Cloud → 目标服务器)</SelectItem>
-                <SelectItem value="local">Local (Agent → Agent)</SelectItem>
-                <SelectItem value="p2p">P2P (Agent ↔ Agent)</SelectItem>
+                <SelectItem value="cloud-direct">云端直连 (Cloud → 目标服务器)</SelectItem>
+                <SelectItem value="cloud-agent">云端到客户端 (Cloud → Agent → 目标)</SelectItem>
+                <SelectItem value="agent-cloud">客户端到云端 (Agent → Cloud → 目标)</SelectItem>
+                <SelectItem value="agent-agent">客户端到客户端 (Agent → Agent)</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -281,9 +342,9 @@ function CreateRuleDialog({
             </Select>
           </div>
         </div>
-        {form.type !== 'remote' && (
+        {(form.type === 'agent-cloud' || form.type === 'agent-agent') && (
           <div className="grid gap-2">
-            <Label>源 Agent</Label>
+            <Label>源 Agent（监听端）</Label>
             <Select value={form.sourceAgentId} onValueChange={(v) => setForm({ ...form, sourceAgentId: v })}>
               <SelectTrigger>
                 <SelectValue placeholder="选择源 Agent" />
@@ -305,9 +366,9 @@ function CreateRuleDialog({
             onChange={(e) => setForm({ ...form, listenPort: e.target.value })}
           />
         </div>
-        {form.type !== 'cloud-self' && (
+        {(form.type === 'cloud-agent' || form.type === 'agent-agent') && (
           <div className="grid gap-2">
-            <Label>目标 Agent</Label>
+            <Label>目标 Agent（转发端）</Label>
             <Select value={form.targetAgentId} onValueChange={(v) => setForm({ ...form, targetAgentId: v })}>
               <SelectTrigger>
                 <SelectValue placeholder="选择目标 Agent" />

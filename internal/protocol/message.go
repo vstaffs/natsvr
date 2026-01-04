@@ -37,6 +37,13 @@ const (
 	MsgTypeP2PConnectAck   MessageType = 53
 	MsgTypeP2PData         MessageType = 54
 
+	// Agent-to-Cloud forwarding (agent listens, cloud forwards to target)
+	MsgTypeAgentCloudProxyStart MessageType = 60
+	MsgTypeAgentCloudProxyStop  MessageType = 61
+	MsgTypeAgentCloudConnect    MessageType = 62
+	MsgTypeAgentCloudConnectAck MessageType = 63
+	MsgTypeAgentCloudData       MessageType = 64
+
 	// Error
 	MsgTypeError MessageType = 255
 )
@@ -135,6 +142,27 @@ type P2PConnectPayload struct {
 type P2PDataPayload struct {
 	SourceAgentID string
 	Data          []byte
+}
+
+// AgentCloudProxyStartPayload tells agent to start listening for agent-cloud proxy
+type AgentCloudProxyStartPayload struct {
+	RuleID     string
+	Protocol   string
+	ListenPort uint16
+	TargetHost string
+	TargetPort uint16
+}
+
+// AgentCloudProxyStopPayload tells agent to stop an agent-cloud proxy
+type AgentCloudProxyStopPayload struct {
+	RuleID string
+}
+
+// AgentCloudConnectPayload is used for agent-to-cloud tunnel connection
+type AgentCloudConnectPayload struct {
+	Protocol   string
+	TargetHost string
+	TargetPort uint16
 }
 
 // Error codes
@@ -315,6 +343,16 @@ func (t MessageType) String() string {
 		return "P2PConnectAck"
 	case MsgTypeP2PData:
 		return "P2PData"
+	case MsgTypeAgentCloudProxyStart:
+		return "AgentCloudProxyStart"
+	case MsgTypeAgentCloudProxyStop:
+		return "AgentCloudProxyStop"
+	case MsgTypeAgentCloudConnect:
+		return "AgentCloudConnect"
+	case MsgTypeAgentCloudConnectAck:
+		return "AgentCloudConnectAck"
+	case MsgTypeAgentCloudData:
+		return "AgentCloudData"
 	case MsgTypeError:
 		return "Error"
 	default:

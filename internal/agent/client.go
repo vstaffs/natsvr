@@ -20,17 +20,19 @@ type Config struct {
 
 // Client is the agent client
 type Client struct {
-	config       *Config
-	agentID      string
-	conn         *websocket.Conn
-	connMu       sync.Mutex
-	tunnels      map[uint32]*TunnelHandler
-	tunnelsMu    sync.RWMutex
-	localProxies map[string]*P2PProxy // rule ID -> proxy
-	localProxyMu sync.RWMutex
-	ctx          context.Context
-	cancel       context.CancelFunc
-	connected    bool
+	config            *Config
+	agentID           string
+	conn              *websocket.Conn
+	connMu            sync.Mutex
+	tunnels           map[uint32]*TunnelHandler
+	tunnelsMu         sync.RWMutex
+	localProxies      map[string]*P2PProxy        // rule ID -> P2P proxy
+	localProxyMu      sync.RWMutex
+	agentCloudProxies map[string]*AgentCloudProxy // rule ID -> agent-cloud proxy
+	agentCloudProxyMu sync.RWMutex
+	ctx               context.Context
+	cancel            context.CancelFunc
+	connected         bool
 }
 
 // TunnelHandler handles a single tunnel
@@ -54,12 +56,13 @@ func NewClient(cfg *Config) (*Client, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Client{
-		config:       cfg,
-		agentID:      utils.GenerateID(16),
-		tunnels:      make(map[uint32]*TunnelHandler),
-		localProxies: make(map[string]*P2PProxy),
-		ctx:          ctx,
-		cancel:       cancel,
+		config:            cfg,
+		agentID:           utils.GenerateID(16),
+		tunnels:           make(map[uint32]*TunnelHandler),
+		localProxies:      make(map[string]*P2PProxy),
+		agentCloudProxies: make(map[string]*AgentCloudProxy),
+		ctx:               ctx,
+		cancel:            cancel,
 	}, nil
 }
 
@@ -90,9 +93,10 @@ func (c *Client) Run() {
 		c.connected = false
 		log.Printf("Disconnected from server, reconnecting...")
 
-		// Cleanup tunnels and local proxies
+		// Cleanup tunnels and proxies
 		c.cleanupTunnels()
 		c.cleanupLocalProxies()
+		c.cleanupAgentCloudProxies()
 
 		time.Sleep(2 * time.Second)
 	}
@@ -110,6 +114,7 @@ func (c *Client) Shutdown() {
 
 	c.cleanupTunnels()
 	c.cleanupLocalProxies()
+	c.cleanupAgentCloudProxies()
 }
 
 func (c *Client) connect() error {
@@ -233,6 +238,18 @@ func (c *Client) handleMessages() {
 
 		case protocol.MsgTypeP2PData:
 			c.handleP2PData(msg)
+
+		case protocol.MsgTypeAgentCloudProxyStart:
+			go c.handleAgentCloudProxyStart(msg)
+
+		case protocol.MsgTypeAgentCloudProxyStop:
+			c.handleAgentCloudProxyStop(msg)
+
+		case protocol.MsgTypeAgentCloudConnectAck:
+			c.handleAgentCloudConnectAck(msg)
+
+		case protocol.MsgTypeAgentCloudData:
+			c.handleAgentCloudData(msg)
 		}
 	}
 }
@@ -506,5 +523,92 @@ func (c *Client) cleanupLocalProxies() {
 		delete(c.localProxies, id)
 	}
 	c.localProxyMu.Unlock()
+}
+
+func (c *Client) handleAgentCloudProxyStart(msg *protocol.Message) {
+	payload, err := protocol.DecodeAgentCloudProxyStartPayload(msg.Payload)
+	if err != nil {
+		log.Printf("Failed to decode agent-cloud proxy start payload: %v", err)
+		return
+	}
+
+	log.Printf("Starting agent-cloud proxy: %s on port %d -> cloud -> %s:%d",
+		payload.RuleID, payload.ListenPort, payload.TargetHost, payload.TargetPort)
+
+	c.agentCloudProxyMu.Lock()
+	if _, exists := c.agentCloudProxies[payload.RuleID]; exists {
+		c.agentCloudProxyMu.Unlock()
+		log.Printf("Agent-cloud proxy %s already exists", payload.RuleID)
+		return
+	}
+	c.agentCloudProxyMu.Unlock()
+
+	proxy := NewAgentCloudProxy(c, payload.RuleID, int(payload.ListenPort), payload.TargetHost, int(payload.TargetPort), payload.Protocol)
+	if err := proxy.Start(); err != nil {
+		log.Printf("Failed to start agent-cloud proxy %s: %v", payload.RuleID, err)
+		return
+	}
+
+	c.agentCloudProxyMu.Lock()
+	c.agentCloudProxies[payload.RuleID] = proxy
+	c.agentCloudProxyMu.Unlock()
+
+	log.Printf("Agent-cloud proxy %s started on port %d", payload.RuleID, payload.ListenPort)
+}
+
+func (c *Client) handleAgentCloudProxyStop(msg *protocol.Message) {
+	payload, err := protocol.DecodeAgentCloudProxyStopPayload(msg.Payload)
+	if err != nil {
+		log.Printf("Failed to decode agent-cloud proxy stop payload: %v", err)
+		return
+	}
+
+	c.agentCloudProxyMu.Lock()
+	proxy, exists := c.agentCloudProxies[payload.RuleID]
+	if exists {
+		proxy.Stop()
+		delete(c.agentCloudProxies, payload.RuleID)
+	}
+	c.agentCloudProxyMu.Unlock()
+
+	if exists {
+		log.Printf("Agent-cloud proxy %s stopped", payload.RuleID)
+	}
+}
+
+func (c *Client) handleAgentCloudConnectAck(msg *protocol.Message) {
+	ack, err := protocol.DecodeConnectAckPayload(msg.Payload)
+	if err != nil {
+		log.Printf("Failed to decode agent-cloud connect ack: %v", err)
+		return
+	}
+
+	// Find the proxy that has this pending tunnel
+	c.agentCloudProxyMu.RLock()
+	for _, proxy := range c.agentCloudProxies {
+		proxy.HandleConnectAck(msg.TunnelID, ack)
+	}
+	c.agentCloudProxyMu.RUnlock()
+}
+
+func (c *Client) handleAgentCloudData(msg *protocol.Message) {
+	// Find the proxy connection for this tunnel
+	c.agentCloudProxyMu.RLock()
+	for _, proxy := range c.agentCloudProxies {
+		if proxy.HandleData(msg.TunnelID, msg.Payload) {
+			c.agentCloudProxyMu.RUnlock()
+			return
+		}
+	}
+	c.agentCloudProxyMu.RUnlock()
+}
+
+func (c *Client) cleanupAgentCloudProxies() {
+	c.agentCloudProxyMu.Lock()
+	for id, proxy := range c.agentCloudProxies {
+		proxy.Stop()
+		delete(c.agentCloudProxies, id)
+	}
+	c.agentCloudProxyMu.Unlock()
 }
 

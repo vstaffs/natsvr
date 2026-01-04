@@ -588,3 +588,280 @@ func (p *P2PProxy) HandleData(globalTunnelID uint32, data []byte) bool {
 	return true
 }
 
+// AgentCloudProxy handles agent-to-cloud forwarding
+// Agent listens locally, cloud connects directly to target server
+type AgentCloudProxy struct {
+	client        *Client
+	ruleID        string
+	listenPort    int
+	targetHost    string
+	targetPort    int
+	protocol      string
+	listener      net.Listener
+	udpConn       *net.UDPConn
+	running       bool
+	runMu         sync.Mutex
+	tunnelIDGen   uint32
+	tunnels       map[uint32]*AgentCloudTunnelConn // Keyed by global tunnel ID
+	tunnelsMu     sync.RWMutex
+	pendingAcks   map[uint32]chan *protocol.ConnectAckPayload // Keyed by local tunnel ID
+	pendingMu     sync.Mutex
+	localToGlobal map[uint32]uint32 // local tunnel ID -> global tunnel ID
+	localGlobalMu sync.RWMutex
+}
+
+// AgentCloudTunnelConn represents an agent-cloud tunnel connection
+type AgentCloudTunnelConn struct {
+	LocalTunnelID  uint32
+	GlobalTunnelID uint32
+	ClientConn     net.Conn
+}
+
+// NewAgentCloudProxy creates a new agent-cloud proxy
+func NewAgentCloudProxy(client *Client, ruleID string, listenPort int, targetHost string, targetPort int, proto string) *AgentCloudProxy {
+	return &AgentCloudProxy{
+		client:        client,
+		ruleID:        ruleID,
+		listenPort:    listenPort,
+		targetHost:    targetHost,
+		targetPort:    targetPort,
+		protocol:      proto,
+		tunnels:       make(map[uint32]*AgentCloudTunnelConn),
+		pendingAcks:   make(map[uint32]chan *protocol.ConnectAckPayload),
+		localToGlobal: make(map[uint32]uint32),
+	}
+}
+
+// Start starts the agent-cloud proxy
+func (p *AgentCloudProxy) Start() error {
+	p.runMu.Lock()
+	defer p.runMu.Unlock()
+
+	if p.running {
+		return fmt.Errorf("proxy already running")
+	}
+
+	switch p.protocol {
+	case "tcp":
+		listener, err := net.Listen("tcp", fmt.Sprintf(":%d", p.listenPort))
+		if err != nil {
+			return err
+		}
+		p.listener = listener
+		go p.acceptTCP()
+
+	case "udp":
+		addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", p.listenPort))
+		if err != nil {
+			return err
+		}
+		conn, err := net.ListenUDP("udp", addr)
+		if err != nil {
+			return err
+		}
+		p.udpConn = conn
+		go p.handleUDP()
+	}
+
+	p.running = true
+	log.Printf("Agent-cloud proxy started on :%d -> cloud -> %s:%d", p.listenPort, p.targetHost, p.targetPort)
+
+	return nil
+}
+
+// Stop stops the agent-cloud proxy
+func (p *AgentCloudProxy) Stop() {
+	p.runMu.Lock()
+	defer p.runMu.Unlock()
+
+	p.running = false
+	if p.listener != nil {
+		p.listener.Close()
+	}
+	if p.udpConn != nil {
+		p.udpConn.Close()
+	}
+
+	// Close all tunnel connections
+	p.tunnelsMu.Lock()
+	for _, tunnel := range p.tunnels {
+		tunnel.ClientConn.Close()
+	}
+	p.tunnels = make(map[uint32]*AgentCloudTunnelConn)
+	p.tunnelsMu.Unlock()
+}
+
+func (p *AgentCloudProxy) acceptTCP() {
+	for {
+		p.runMu.Lock()
+		running := p.running
+		p.runMu.Unlock()
+
+		if !running {
+			return
+		}
+
+		conn, err := p.listener.Accept()
+		if err != nil {
+			if p.running {
+				log.Printf("Agent-cloud proxy accept error: %v", err)
+			}
+			continue
+		}
+
+		go p.handleTCPConn(conn)
+	}
+}
+
+func (p *AgentCloudProxy) handleTCPConn(conn net.Conn) {
+	localTunnelID := atomic.AddUint32(&p.tunnelIDGen, 1)
+	remoteAddr := conn.RemoteAddr().String()
+
+	log.Printf("Agent-cloud proxy: new connection from %s, local tunnel ID: %d", remoteAddr, localTunnelID)
+
+	// Create pending ack channel
+	ackChan := make(chan *protocol.ConnectAckPayload, 1)
+	p.pendingMu.Lock()
+	p.pendingAcks[localTunnelID] = ackChan
+	p.pendingMu.Unlock()
+
+	defer func() {
+		p.pendingMu.Lock()
+		delete(p.pendingAcks, localTunnelID)
+		p.pendingMu.Unlock()
+	}()
+
+	// Send agent-cloud connect request to cloud
+	log.Printf("Agent-cloud proxy: sending connect request to cloud for %s:%d", p.targetHost, p.targetPort)
+
+	payload := protocol.EncodeAgentCloudConnectPayload(&protocol.AgentCloudConnectPayload{
+		Protocol:   p.protocol,
+		TargetHost: p.targetHost,
+		TargetPort: uint16(p.targetPort),
+	})
+	msg := protocol.NewMessage(protocol.MsgTypeAgentCloudConnect, localTunnelID, payload)
+	if err := p.client.sendMessage(msg); err != nil {
+		log.Printf("Agent-cloud proxy: failed to send connect request: %v", err)
+		conn.Close()
+		return
+	}
+
+	log.Printf("Agent-cloud proxy: waiting for connect ack...")
+
+	// Wait for ack
+	var ack *protocol.ConnectAckPayload
+	select {
+	case ack = <-ackChan:
+		if !ack.Success {
+			log.Printf("Agent-cloud proxy: connect failed: %s", ack.Error)
+			conn.Close()
+			return
+		}
+		log.Printf("Agent-cloud proxy: connect succeeded, global tunnel ID: %d", ack.TunnelID)
+	case <-time.After(30 * time.Second):
+		log.Printf("Agent-cloud proxy: connect timeout (30s)")
+		conn.Close()
+		return
+	}
+
+	globalTunnelID := ack.TunnelID
+
+	// Store local to global mapping
+	p.localGlobalMu.Lock()
+	p.localToGlobal[localTunnelID] = globalTunnelID
+	p.localGlobalMu.Unlock()
+
+	// Register tunnel
+	p.tunnelsMu.Lock()
+	p.tunnels[globalTunnelID] = &AgentCloudTunnelConn{
+		LocalTunnelID:  localTunnelID,
+		GlobalTunnelID: globalTunnelID,
+		ClientConn:     conn,
+	}
+	p.tunnelsMu.Unlock()
+
+	log.Printf("Agent-cloud tunnel established: local=%d global=%d", localTunnelID, globalTunnelID)
+
+	defer func() {
+		conn.Close()
+		p.tunnelsMu.Lock()
+		delete(p.tunnels, globalTunnelID)
+		p.tunnelsMu.Unlock()
+
+		p.localGlobalMu.Lock()
+		delete(p.localToGlobal, localTunnelID)
+		p.localGlobalMu.Unlock()
+
+		// Send close message
+		p.client.sendMessage(protocol.NewCloseMessage(globalTunnelID))
+		log.Printf("Agent-cloud tunnel closed: local=%d global=%d", localTunnelID, globalTunnelID)
+	}()
+
+	// Read from client and send to cloud
+	log.Printf("Agent-cloud tunnel %d: starting data forwarding", globalTunnelID)
+	buf := make([]byte, 32768)
+	for {
+		p.runMu.Lock()
+		running := p.running
+		p.runMu.Unlock()
+
+		if !running {
+			log.Printf("Agent-cloud tunnel %d: proxy stopped", globalTunnelID)
+			return
+		}
+
+		n, err := conn.Read(buf)
+		if err != nil {
+			log.Printf("Agent-cloud tunnel %d: client read error: %v", globalTunnelID, err)
+			return
+		}
+
+		if n > 0 {
+			log.Printf("Agent-cloud tunnel %d: sending %d bytes to cloud", globalTunnelID, n)
+			dataMsg := protocol.NewMessage(protocol.MsgTypeAgentCloudData, globalTunnelID, buf[:n])
+			if err := p.client.sendMessage(dataMsg); err != nil {
+				log.Printf("Agent-cloud tunnel %d: send error: %v", globalTunnelID, err)
+				return
+			}
+		}
+	}
+}
+
+func (p *AgentCloudProxy) handleUDP() {
+	log.Printf("UDP agent-cloud forwarding not yet implemented")
+}
+
+// HandleConnectAck handles an agent-cloud connect acknowledgment
+func (p *AgentCloudProxy) HandleConnectAck(localTunnelID uint32, ack *protocol.ConnectAckPayload) {
+	p.pendingMu.Lock()
+	ch, exists := p.pendingAcks[localTunnelID]
+	p.pendingMu.Unlock()
+
+	if exists {
+		select {
+		case ch <- ack:
+		default:
+		}
+	}
+}
+
+// HandleData handles incoming agent-cloud data from cloud
+// Returns true if the data was handled
+func (p *AgentCloudProxy) HandleData(globalTunnelID uint32, data []byte) bool {
+	p.tunnelsMu.RLock()
+	tunnel, exists := p.tunnels[globalTunnelID]
+	p.tunnelsMu.RUnlock()
+
+	if !exists {
+		return false
+	}
+
+	log.Printf("Agent-cloud tunnel %d: received %d bytes from cloud, writing to client", globalTunnelID, len(data))
+	_, err := tunnel.ClientConn.Write(data)
+	if err != nil {
+		log.Printf("Agent-cloud tunnel %d: write to client error: %v", globalTunnelID, err)
+		tunnel.ClientConn.Close()
+	}
+	return true
+}
+
