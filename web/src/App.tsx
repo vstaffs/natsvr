@@ -4,13 +4,21 @@ import { ForwardingPage } from '@/pages/ForwardingPage'
 import { SettingsPage } from '@/pages/SettingsPage'
 import { Button } from '@/components/ui/button'
 import { useTheme } from '@/hooks/useTheme'
+import { useQuery } from '@tanstack/react-query'
+import { api } from '@/api/client'
 import { Network, ArrowRightLeft, Settings, Activity, Sun, Moon } from 'lucide-react'
 
 function App() {
   const { theme, toggleTheme } = useTheme()
+  
+  const { data: version } = useQuery({
+    queryKey: ['version'],
+    queryFn: api.getVersion,
+    staleTime: Infinity, // Version doesn't change during runtime
+  })
 
   return (
-    <div className="min-h-screen bg-background grid-background">
+    <div className="min-h-screen bg-background grid-background flex flex-col">
       {/* Header */}
       <header className="border-b border-border/50 backdrop-blur-sm sticky top-0 z-40 bg-background/80">
         <div className="container mx-auto px-6 py-4">
@@ -48,7 +56,7 @@ function App() {
       </header>
 
       {/* Main Content */}
-      <main className="container mx-auto px-6 py-8">
+      <main className="container mx-auto px-6 py-8 flex-1">
         <Tabs defaultValue="agents" className="space-y-6">
           <TabsList className="bg-card/50 border border-border/50 p-1">
             <TabsTrigger value="agents" className="gap-2 data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
@@ -78,6 +86,22 @@ function App() {
           </TabsContent>
         </Tabs>
       </main>
+
+      {/* Footer */}
+      <footer className="border-t border-border/50 backdrop-blur-sm bg-background/80 py-4">
+        <div className="container mx-auto px-6">
+          <div className="flex flex-wrap items-center justify-center gap-2 text-xs text-muted-foreground">
+            <span className="font-mono">Version: {version?.version || 'dev'}</span>
+            <span>•</span>
+            <span className="font-mono">Commit: {version?.commit || 'unknown'}</span>
+            <span>•</span>
+            <span className="font-mono">Branch: {version?.branch || 'unknown'}</span>
+            <span>•</span>
+            <span className="font-mono">Built: {version?.buildTime || 'unknown'}</span>
+            {version?.buildTime && <span className="text-muted-foreground/70">(北京时间)</span>}
+          </div>
+        </div>
+      </footer>
     </div>
   )
 }

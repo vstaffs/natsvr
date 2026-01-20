@@ -547,8 +547,9 @@ func EncodeP2PConnectPayload(p *P2PConnectPayload) []byte {
 	srcAgentBytes := []byte(p.SourceAgentID)
 	protocolBytes := []byte(p.Protocol)
 	targetHostBytes := []byte(p.TargetHost)
+	ruleIDBytes := []byte(p.RuleID)
 
-	buf := make([]byte, 10+len(srcAgentBytes)+len(protocolBytes)+len(targetHostBytes))
+	buf := make([]byte, 12+len(srcAgentBytes)+len(protocolBytes)+len(targetHostBytes)+len(ruleIDBytes))
 
 	offset := 0
 	binary.BigEndian.PutUint16(buf[offset:offset+2], uint16(len(srcAgentBytes)))
@@ -567,6 +568,11 @@ func EncodeP2PConnectPayload(p *P2PConnectPayload) []byte {
 	offset += len(targetHostBytes)
 
 	binary.BigEndian.PutUint16(buf[offset:offset+2], p.TargetPort)
+	offset += 2
+
+	binary.BigEndian.PutUint16(buf[offset:offset+2], uint16(len(ruleIDBytes)))
+	offset += 2
+	copy(buf[offset:], ruleIDBytes)
 
 	return buf
 }
@@ -613,12 +619,24 @@ func DecodeP2PConnectPayload(data []byte) (*P2PConnectPayload, error) {
 		return nil, ErrInvalidPayload
 	}
 	targetPort := binary.BigEndian.Uint16(data[offset : offset+2])
+	offset += 2
+
+	// RuleID is optional for backward compatibility
+	var ruleID string
+	if offset+2 <= len(data) {
+		ruleIDLen := binary.BigEndian.Uint16(data[offset : offset+2])
+		offset += 2
+		if offset+int(ruleIDLen) <= len(data) {
+			ruleID = string(data[offset : offset+int(ruleIDLen)])
+		}
+	}
 
 	return &P2PConnectPayload{
 		SourceAgentID: srcAgent,
 		Protocol:      protocol,
 		TargetHost:    targetHost,
 		TargetPort:    targetPort,
+		RuleID:        ruleID,
 	}, nil
 }
 
@@ -777,8 +795,9 @@ func DecodeAgentCloudProxyStopPayload(data []byte) (*AgentCloudProxyStopPayload,
 func EncodeAgentCloudConnectPayload(p *AgentCloudConnectPayload) []byte {
 	protocolBytes := []byte(p.Protocol)
 	targetHostBytes := []byte(p.TargetHost)
+	ruleIDBytes := []byte(p.RuleID)
 
-	buf := make([]byte, 6+len(protocolBytes)+len(targetHostBytes))
+	buf := make([]byte, 8+len(protocolBytes)+len(targetHostBytes)+len(ruleIDBytes))
 
 	offset := 0
 	binary.BigEndian.PutUint16(buf[offset:offset+2], uint16(len(protocolBytes)))
@@ -792,6 +811,11 @@ func EncodeAgentCloudConnectPayload(p *AgentCloudConnectPayload) []byte {
 	offset += len(targetHostBytes)
 
 	binary.BigEndian.PutUint16(buf[offset:offset+2], p.TargetPort)
+	offset += 2
+
+	binary.BigEndian.PutUint16(buf[offset:offset+2], uint16(len(ruleIDBytes)))
+	offset += 2
+	copy(buf[offset:], ruleIDBytes)
 
 	return buf
 }
@@ -827,11 +851,23 @@ func DecodeAgentCloudConnectPayload(data []byte) (*AgentCloudConnectPayload, err
 		return nil, ErrInvalidPayload
 	}
 	targetPort := binary.BigEndian.Uint16(data[offset : offset+2])
+	offset += 2
+
+	// RuleID is optional for backward compatibility
+	var ruleID string
+	if offset+2 <= len(data) {
+		ruleIDLen := binary.BigEndian.Uint16(data[offset : offset+2])
+		offset += 2
+		if offset+int(ruleIDLen) <= len(data) {
+			ruleID = string(data[offset : offset+int(ruleIDLen)])
+		}
+	}
 
 	return &AgentCloudConnectPayload{
 		Protocol:   protocol,
 		TargetHost: targetHost,
 		TargetPort: targetPort,
+		RuleID:     ruleID,
 	}, nil
 }
 

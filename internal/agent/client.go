@@ -606,6 +606,18 @@ func (c *Client) handleRuleMessages(rc *RuleConnection) {
 
 		case protocol.MsgTypeClose:
 			c.handleRuleClose(rc, msg)
+
+		case protocol.MsgTypeP2PConnectAck:
+			c.handleP2PConnectAck(msg)
+
+		case protocol.MsgTypeP2PData:
+			c.handleP2PData(msg)
+
+		case protocol.MsgTypeAgentCloudConnectAck:
+			c.handleAgentCloudConnectAck(msg)
+
+		case protocol.MsgTypeAgentCloudData:
+			c.handleAgentCloudData(msg)
 		}
 	}
 }
@@ -862,12 +874,24 @@ func (c *Client) handleP2PConnectAck(msg *protocol.Message) {
 		return
 	}
 
+	log.Printf("P2P connect ack received: msg.TunnelID=%d, ack.TunnelID=%d, success=%v", msg.TunnelID, ack.TunnelID, ack.Success)
+
 	// Find the proxy that has this pending tunnel
+	// msg.TunnelID should be the local tunnel ID
 	c.localProxyMu.RLock()
-	for _, proxy := range c.localProxies {
+	found := false
+	for ruleID, proxy := range c.localProxies {
+		log.Printf("Checking proxy for rule %s with local tunnel ID %d", ruleID, msg.TunnelID)
 		proxy.HandleConnectAck(msg.TunnelID, ack)
+		// Check if this proxy handled it by checking if the channel exists
+		// We can't directly check, but we can log
+		found = true
 	}
 	c.localProxyMu.RUnlock()
+
+	if !found {
+		log.Printf("P2P connect ack: no proxy found for tunnel ID %d", msg.TunnelID)
+	}
 }
 
 func (c *Client) handleP2PData(msg *protocol.Message) {

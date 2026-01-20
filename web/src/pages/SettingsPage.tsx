@@ -6,12 +6,14 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { api } from '@/api/client'
-import { Copy, Plus, Trash2, Key, RefreshCw, Info } from 'lucide-react'
+import { Copy, Plus, Trash2, Key, RefreshCw, Info, Eye, EyeOff, Check } from 'lucide-react'
 
 export function SettingsPage() {
   const queryClient = useQueryClient()
   const [newTokenName, setNewTokenName] = useState('')
   const [copiedId, setCopiedId] = useState<string | null>(null)
+  const [expandedTokens, setExpandedTokens] = useState<Set<string>>(new Set())
+  const [newlyCreatedTokenId, setNewlyCreatedTokenId] = useState<string | null>(null)
 
   const { data: tokens, isLoading } = useQuery({
     queryKey: ['tokens'],
@@ -26,9 +28,14 @@ export function SettingsPage() {
 
   const createMutation = useMutation({
     mutationFn: api.createToken,
-    onSuccess: () => {
+    onSuccess: (newToken) => {
       queryClient.invalidateQueries({ queryKey: ['tokens'] })
       setNewTokenName('')
+      // 自动展开新创建的 token
+      setExpandedTokens(prev => new Set([...prev, newToken.id]))
+      setNewlyCreatedTokenId(newToken.id)
+      // 5秒后移除高亮
+      setTimeout(() => setNewlyCreatedTokenId(null), 5000)
     },
   })
 
@@ -39,10 +46,26 @@ export function SettingsPage() {
     },
   })
 
-  const copyToClipboard = (text: string, id: string) => {
-    navigator.clipboard.writeText(text)
-    setCopiedId(id)
-    setTimeout(() => setCopiedId(null), 2000)
+  const copyToClipboard = async (text: string, id: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopiedId(id)
+      setTimeout(() => setCopiedId(null), 2000)
+    } catch (err) {
+      console.error('Failed to copy:', err)
+    }
+  }
+
+  const toggleTokenExpansion = (tokenId: string) => {
+    setExpandedTokens(prev => {
+      const next = new Set(prev)
+      if (next.has(tokenId)) {
+        next.delete(tokenId)
+      } else {
+        next.add(tokenId)
+      }
+      return next
+    })
   }
 
   return (
@@ -87,43 +110,93 @@ export function SettingsPage() {
             </div>
           ) : tokens && tokens.length > 0 ? (
             <div className="space-y-2">
-              {tokens.map((token) => (
-                <div
-                  key={token.id}
-                  className="flex items-center justify-between p-3 rounded-lg border border-border/50 bg-background/50"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded bg-primary/10 flex items-center justify-center">
-                      <Key className="w-4 h-4 text-primary" />
-                    </div>
-                    <div>
-                      <p className="font-medium">{token.name}</p>
-                      <p className="text-xs text-muted-foreground font-mono">
-                        {token.token.slice(0, 8)}...{token.token.slice(-8)}
-                      </p>
+              {tokens.map((token) => {
+                const isExpanded = expandedTokens.has(token.id)
+                const isCopied = copiedId === token.id
+                const isNewlyCreated = newlyCreatedTokenId === token.id
+                
+                return (
+                  <div
+                    key={token.id}
+                    className={`p-3 rounded-lg border bg-background/50 transition-all ${
+                      isNewlyCreated 
+                        ? 'border-primary/50 bg-primary/5 shadow-sm' 
+                        : 'border-border/50'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-start gap-3 flex-1 min-w-0">
+                        <div className="w-8 h-8 rounded bg-primary/10 flex items-center justify-center flex-shrink-0">
+                          <Key className="w-4 h-4 text-primary" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="font-medium mb-1">{token.name}</p>
+                          <div className="space-y-1">
+                            {isExpanded ? (
+                              <div className="space-y-2">
+                                <div 
+                                  className="p-2 rounded bg-background border border-border/50 font-mono text-xs break-all cursor-pointer hover:bg-accent/50 transition-colors"
+                                  onClick={() => copyToClipboard(token.token, token.id)}
+                                  title="点击复制完整 Token"
+                                >
+                                  {token.token}
+                                </div>
+                                {isCopied && (
+                                  <p className="text-xs text-primary flex items-center gap-1">
+                                    <Check className="w-3 h-3" />
+                                    已复制到剪贴板
+                                  </p>
+                                )}
+                              </div>
+                            ) : (
+                              <p className="text-xs text-muted-foreground font-mono">
+                                {token.token.slice(0, 8)}...{token.token.slice(-8)}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        <Badge variant="outline" className="text-xs">
+                          {token.usageCount} 次使用
+                        </Badge>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => toggleTokenExpansion(token.id)}
+                          title={isExpanded ? "隐藏完整 Token" : "显示完整 Token"}
+                        >
+                          {isExpanded ? (
+                            <EyeOff className="w-4 h-4" />
+                          ) : (
+                            <Eye className="w-4 h-4" />
+                          )}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => copyToClipboard(token.token, token.id)}
+                          title="复制 Token"
+                        >
+                          {isCopied ? (
+                            <Check className="w-4 h-4 text-primary" />
+                          ) : (
+                            <Copy className="w-4 h-4" />
+                          )}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => deleteMutation.mutate(token.id)}
+                          title="删除 Token"
+                        >
+                          <Trash2 className="w-4 h-4 text-destructive" />
+                        </Button>
+                      </div>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <Badge variant="outline" className="text-xs">
-                      {token.usageCount} 次使用
-                    </Badge>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => copyToClipboard(token.token, token.id)}
-                    >
-                      <Copy className={`w-4 h-4 ${copiedId === token.id ? 'text-primary' : ''}`} />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => deleteMutation.mutate(token.id)}
-                    >
-                      <Trash2 className="w-4 h-4 text-destructive" />
-                    </Button>
-                  </div>
-                </div>
-              ))}
+                )
+              })}
             </div>
           ) : (
             <div className="text-center py-8 text-muted-foreground">

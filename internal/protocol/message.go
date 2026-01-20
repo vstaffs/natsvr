@@ -140,6 +140,7 @@ type P2PConnectPayload struct {
 	Protocol      string
 	TargetHost    string
 	TargetPort    uint16
+	RuleID        string // Rule ID for per-rule connection isolation
 }
 
 // P2PDataPayload wraps data between source and target agents
@@ -167,6 +168,7 @@ type AgentCloudConnectPayload struct {
 	Protocol   string
 	TargetHost string
 	TargetPort uint16
+	RuleID     string // Rule ID for per-rule connection isolation
 }
 
 // RuleAuthPayload is the rule-specific connection authentication payload

@@ -447,14 +447,15 @@ func (p *P2PProxy) handleTCPConn(conn net.Conn) {
 	}()
 
 	// Send P2P connect request through cloud with local tunnel ID
-	log.Printf("P2P proxy: sending connect request to target agent %s for %s:%d",
-		p.targetAgentID, p.targetHost, p.targetPort)
+	log.Printf("P2P proxy: sending connect request to target agent %s for %s:%d (rule: %s)",
+		p.targetAgentID, p.targetHost, p.targetPort, p.ruleID)
 
 	payload := protocol.EncodeP2PConnectPayload(&protocol.P2PConnectPayload{
 		SourceAgentID: p.targetAgentID,
 		Protocol:      p.protocol,
 		TargetHost:    p.targetHost,
 		TargetPort:    uint16(p.targetPort),
+		RuleID:        p.ruleID,
 	})
 	msg := protocol.NewMessage(protocol.MsgTypeP2PConnect, localTunnelID, payload)
 	if err := p.client.sendMessage(msg); err != nil {
@@ -555,15 +556,31 @@ func (p *P2PProxy) handleUDP() {
 // HandleConnectAck handles a P2P connect acknowledgment
 // tunnelID here is the local tunnel ID (msg.TunnelID from the P2PConnectAck message)
 func (p *P2PProxy) HandleConnectAck(localTunnelID uint32, ack *protocol.ConnectAckPayload) {
+	log.Printf("P2P proxy HandleConnectAck: rule=%s, localTunnelID=%d, ack.TunnelID=%d, success=%v", 
+		p.ruleID, localTunnelID, ack.TunnelID, ack.Success)
+	
 	p.pendingMu.Lock()
 	ch, exists := p.pendingAcks[localTunnelID]
 	p.pendingMu.Unlock()
 
 	if exists {
+		log.Printf("P2P proxy: found pending channel for localTunnelID=%d, sending ack", localTunnelID)
 		select {
 		case ch <- ack:
+			log.Printf("P2P proxy: ack sent successfully to channel for localTunnelID=%d", localTunnelID)
 		default:
+			log.Printf("P2P proxy: channel full for localTunnelID=%d, ack dropped", localTunnelID)
 		}
+	} else {
+		log.Printf("P2P proxy: no pending channel found for localTunnelID=%d (rule=%s)", localTunnelID, p.ruleID)
+		// Debug: list all pending tunnel IDs
+		p.pendingMu.Lock()
+		pendingIDs := make([]uint32, 0, len(p.pendingAcks))
+		for id := range p.pendingAcks {
+			pendingIDs = append(pendingIDs, id)
+		}
+		p.pendingMu.Unlock()
+		log.Printf("P2P proxy: current pending tunnel IDs: %v", pendingIDs)
 	}
 }
 
@@ -608,6 +625,8 @@ type AgentCloudProxy struct {
 	pendingMu     sync.Mutex
 	localToGlobal map[uint32]uint32 // local tunnel ID -> global tunnel ID
 	localGlobalMu sync.RWMutex
+	ruleConn      *RuleConnection // Rule-specific connection
+	ruleConnMu    sync.RWMutex
 }
 
 // AgentCloudTunnelConn represents an agent-cloud tunnel connection
@@ -640,6 +659,11 @@ func (p *AgentCloudProxy) Start() error {
 	if p.running {
 		return fmt.Errorf("proxy already running")
 	}
+
+	// Get rule connection if available
+	p.ruleConnMu.Lock()
+	p.ruleConn = p.client.GetRuleConnection(p.ruleID)
+	p.ruleConnMu.Unlock()
 
 	switch p.protocol {
 	case "tcp":
@@ -731,16 +755,17 @@ func (p *AgentCloudProxy) handleTCPConn(conn net.Conn) {
 		p.pendingMu.Unlock()
 	}()
 
-	// Send agent-cloud connect request to cloud
-	log.Printf("Agent-cloud proxy: sending connect request to cloud for %s:%d", p.targetHost, p.targetPort)
+	// Send agent-cloud connect request to cloud via rule connection
+	log.Printf("Agent-cloud proxy: sending connect request to cloud for %s:%d (rule: %s)", p.targetHost, p.targetPort, p.ruleID)
 
 	payload := protocol.EncodeAgentCloudConnectPayload(&protocol.AgentCloudConnectPayload{
 		Protocol:   p.protocol,
 		TargetHost: p.targetHost,
 		TargetPort: uint16(p.targetPort),
+		RuleID:     p.ruleID,
 	})
 	msg := protocol.NewMessage(protocol.MsgTypeAgentCloudConnect, localTunnelID, payload)
-	if err := p.client.sendMessage(msg); err != nil {
+	if err := p.sendMessage(msg); err != nil {
 		log.Printf("Agent-cloud proxy: failed to send connect request: %v", err)
 		conn.Close()
 		return
@@ -792,8 +817,8 @@ func (p *AgentCloudProxy) handleTCPConn(conn net.Conn) {
 		delete(p.localToGlobal, localTunnelID)
 		p.localGlobalMu.Unlock()
 
-		// Send close message
-		p.client.sendMessage(protocol.NewCloseMessage(globalTunnelID))
+		// Send close message via rule connection
+		p.sendMessage(protocol.NewCloseMessage(globalTunnelID))
 		log.Printf("Agent-cloud tunnel closed: local=%d global=%d", localTunnelID, globalTunnelID)
 	}()
 
@@ -819,7 +844,7 @@ func (p *AgentCloudProxy) handleTCPConn(conn net.Conn) {
 		if n > 0 {
 			log.Printf("Agent-cloud tunnel %d: sending %d bytes to cloud", globalTunnelID, n)
 			dataMsg := protocol.NewMessage(protocol.MsgTypeAgentCloudData, globalTunnelID, buf[:n])
-			if err := p.client.sendMessage(dataMsg); err != nil {
+			if err := p.sendMessage(dataMsg); err != nil {
 				log.Printf("Agent-cloud tunnel %d: send error: %v", globalTunnelID, err)
 				return
 			}
@@ -829,6 +854,19 @@ func (p *AgentCloudProxy) handleTCPConn(conn net.Conn) {
 
 func (p *AgentCloudProxy) handleUDP() {
 	log.Printf("UDP agent-cloud forwarding not yet implemented")
+}
+
+// sendMessage sends a message via rule connection or falls back to main connection
+func (p *AgentCloudProxy) sendMessage(msg *protocol.Message) error {
+	p.ruleConnMu.RLock()
+	rc := p.ruleConn
+	p.ruleConnMu.RUnlock()
+
+	if rc != nil && rc.connected {
+		return p.client.sendRuleMessage(rc, msg)
+	}
+	// Fallback to main connection
+	return p.client.sendMessage(msg)
 }
 
 // HandleConnectAck handles an agent-cloud connect acknowledgment

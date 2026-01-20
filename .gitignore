@@ -40,3 +40,4 @@ Thumbs.db
 *.log
 cmd/cloud/cloud
 cloud
+cmd/agent/agent
